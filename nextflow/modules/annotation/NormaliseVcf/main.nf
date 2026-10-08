@@ -45,6 +45,11 @@ process NormaliseVcf {
             -Ou \
             --no-version \
             - | \
+        bcftools sort \
+            -Ou \
+            -m 2G \
+            -T ./bcftools_sort_tmp \
+            - | \
         bcftools +fill-tags \
             -Ob1 \
             --threads ${task.cpus} \
