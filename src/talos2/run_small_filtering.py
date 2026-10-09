@@ -88,6 +88,11 @@ GNOMAD_SOURCE_FIELDS = {
 # per-transcript AlphaMissense INFO fields, folded into the csq string then dropped
 AM_INFO_FIELDS = ('am_transcript', 'am_class', 'am_score')
 
+# echtvar writes this for a variant absent from a numeric source rather than leaving the
+# field missing, so every numeric field any echtvar zip writes has to be checked for it.
+ECHTVAR_MISSING_VALUE = -2147483648
+ECHTVAR_SENTINEL_FIELDS = ('splice_ai_delta', 'splice_ai_csq')
+
 # INFO fields added to the labelled output
 NEW_INFO_HEADERS = [
     {'ID': 'clinvar_significance', 'Number': '1', 'Type': 'String', 'Description': 'ClinvArbitration significance'},
@@ -553,10 +558,25 @@ def prepare_output_header(reader: VCF):
 
 
 def scrub_raw_info(variant: Variant):
-    """Remove the INFO fields we re-shape: BCSQ, and per-transcript AlphaMissense."""
+    """Remove the INFO fields we re-shape: BCSQ, and per-transcript AlphaMissense.
+
+    Also drops echtvar's miss sentinel. echtvar does not leave a numeric field missing
+    for a variant absent from its source -- it writes the configured missing_value
+    (-2147483648). That value survives into the labelled VCF, the results JSON and the
+    report template, where `if (variantData.info.splice_ai_delta)` is true for it and the
+    page prints a SpliceAI score for a variant SpliceAI never scored. Deleting the field
+    is equivalent for the category, which treats an absent score as no evidence.
+    """
     for key in [key for key, _value in variant.INFO]:
         if key == 'BCSQ' or key.startswith('gnomad_') or key in AM_INFO_FIELDS:
             del variant.INFO[key]
+            continue
+        if key in ECHTVAR_SENTINEL_FIELDS:
+            value = variant.INFO.get(key)
+            if value is None or (isinstance(value, (int, float)) and value <= ECHTVAR_MISSING_VALUE):
+                del variant.INFO[key]
+            elif isinstance(value, str) and value in ('.', 'missing'):
+                del variant.INFO[key]
 
 
 def write_gene_rows(

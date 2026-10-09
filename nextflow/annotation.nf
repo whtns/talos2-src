@@ -68,6 +68,14 @@ workflow ANNOTATION {
 
     ch_gnomad_zip = channel.fromPath(params.gnomad_zip, checkIfExists: true).first()
 
+    // Optional SpliceAI source. talos2 defines the spliceai category, reads
+    // INFO/splice_ai_delta and takes its threshold from config, but nothing here ever
+    // annotated SpliceAI -- so run_small_filtering's has_spliceai is False and the
+    // category can never fire. Absent or unset, everything behaves exactly as before.
+    ch_spliceai_zip = (params.spliceai_zip && file(params.spliceai_zip).exists())
+        ? channel.fromPath(params.spliceai_zip, checkIfExists: true).first()
+        : channel.value([])
+
     // skip annotation entirely for cohorts whose shard manifest already exists - reuse the
     // published shards instead. Annotation is expensive and its inputs stable; delete the
     // cohort's `${cohort}_annotated` directory to force re-annotation
@@ -164,6 +172,7 @@ workflow ANNOTATION {
         NormaliseVcf.out,
         ch_gnomad_zip,
         ch_alphamissense_zip,
+        ch_spliceai_zip,
         ch_gff,
         ch_ref_genome,
     )
