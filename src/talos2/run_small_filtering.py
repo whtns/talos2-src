@@ -183,6 +183,7 @@ class StreamingContext:
     spliceai_threshold: float
     avi_threshold: float | None
     critical_csqs: set[str]
+    high_impact_require_mane: bool
     # do as much filtering as possible before considering a variant for de novo inheritance - genotypes are lazy-loaded
     dn_relevant_csqs: set[str]
     derive_af: bool
@@ -365,9 +366,34 @@ def category_alphamissense(consequences: list[dict], am_threshold: float) -> int
     return int(any((csq.get('am_pathogenicity') or 0.0) >= am_threshold for csq in consequences))
 
 
-def category_high_impact(consequences: list[dict], critical_csqs: set[str]) -> int:
+def carries_critical_csq(csq: dict, critical_csqs: set[str], require_mane: bool) -> bool:
+    """Does this one transcript carry a critical consequence that counts?
+
+    With require_mane set, only a MANE transcript counts: a critical consequence that
+    exists solely on a minor transcript is a weaker claim than the category name implies.
+    """
+    if not (critical_csqs & set(csq['consequence'].split('&'))):
+        return False
+    if not require_mane:
+        return True
+
+    # A MANE id is a RefSeq mRNA accession. This is the same test consequences_for_gene
+    # already uses; do NOT compare against a MISSING_STRING constant, because the writer
+    # of this field and this module disagree about what the missing value is.
+    is_mane = 'NM' in (csq.get('mane_id') or '')
+
+    # snRNA transcripts are exempt, and the exemption is load-bearing rather than
+    # defensive: MANE covers protein-coding transcripts only, so no snRNA gene is in it
+    # and a strict requirement would silently discard every snRNA report. This file
+    # already special-cases snRNA twice for the same reason (consequences_for_gene and
+    # filter_by_consequence). RNU4-2 and RNU2-2 are established dominant de novo
+    # neurodevelopmental genes.
+    return is_mane or csq['biotype'] == 'snRNA'
+
+
+def category_high_impact(consequences: list[dict], critical_csqs: set[str], require_mane: bool = False) -> int:
     """Critical protein consequence on at least one transcript."""
-    return int(any(critical_csqs & set(csq['consequence'].split('&')) for csq in consequences))
+    return int(any(carries_critical_csq(csq, critical_csqs, require_mane) for csq in consequences))
 
 
 def category_spliceai(delta_score: float | None, threshold: float) -> int:
@@ -659,7 +685,9 @@ def write_gene_rows(
 
         categories: dict[str, Any] = dict(base_flags)
         categories['categorybooleanalphamissense'] = category_alphamissense(gene_csqs, ctx.am_threshold)
-        categories['categorybooleanhighimpact'] = category_high_impact(gene_csqs, ctx.critical_csqs)
+        categories['categorybooleanhighimpact'] = category_high_impact(
+            gene_csqs, ctx.critical_csqs, ctx.high_impact_require_mane
+        )
         categories['categorybooleanspliceai'] = spliceai_flag
         categories['categorybooleanavi'] = avi_flag
         categories['categorydetailspm5'] = pm5_matches(is_snv, gene_csqs, ctx.pm5)
@@ -828,6 +856,9 @@ def main(
 
     critical_csqs = set(config_retrieve(['RunSmallFiltering', 'critical_csq'], CRITICAL_CSQ_DEFAULT))
     additional_csqs = set(config_retrieve(['RunSmallFiltering', 'additional_csq'], ADDITIONAL_CSQ_DEFAULT))
+    require_mane = config_retrieve(['RunSmallFiltering', 'high_impact_require_mane'], False)
+    if require_mane:
+        logger.info('High Impact requires a MANE transcript (snRNA exempt)')
     dn_conf = DeNovoConfig.from_config()
     if dn_conf.require_parent_evidence:
         logger.info(f'de novo calls require real parental data, GQ >= {dn_conf.min_parent_gq}')
@@ -846,6 +877,7 @@ def main(
         spliceai_threshold=config_retrieve(['RunSmallFiltering', 'spliceai'], 0.5),
         avi_threshold=config_retrieve(['RunSmallFiltering', 'avi'], None),
         critical_csqs=critical_csqs,
+        high_impact_require_mane=require_mane,
         dn_relevant_csqs=critical_csqs | additional_csqs,
         derive_af=derive_af,
         has_spliceai=header_has_field(reader, 'splice_ai_delta'),
