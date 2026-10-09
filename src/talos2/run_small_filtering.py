@@ -129,6 +129,11 @@ class DeNovoConfig:
     min_proband_gq: int = 25
     min_all_sample_gq: int = 19
     apply_min_all_sample_gq: bool = True
+    # a parent's hom-ref only counts as evidence where the caller actually made a call
+    # there. Off by default, mirroring apply_min_all_sample_gq's own escape hatch, so
+    # upstream behaviour is unchanged for anyone who does not ask for it.
+    require_parent_evidence: bool = False
+    min_parent_gq: int = 0
 
     @classmethod
     def from_config(cls) -> 'DeNovoConfig':
@@ -139,6 +144,8 @@ class DeNovoConfig:
             min_proband_gq=conf.get('min_proband_gq', 25),
             min_all_sample_gq=conf.get('min_all_sample_gq', 19),
             apply_min_all_sample_gq=conf.get('apply_min_all_sample_gq', True),
+            require_parent_evidence=conf.get('require_parent_evidence', False),
+            min_parent_gq=conf.get('min_parent_gq', 0),
         )
 
 
@@ -442,6 +449,34 @@ def entry_depths(variant: Variant, n_samples: int, default_depth: int) -> list[i
     return [default_depth] * n_samples
 
 
+def entry_has_depth(variant: Variant, n_samples: int) -> list[bool]:
+    """Whether each sample has a real depth here, which entry_depths cannot say.
+
+    entry_depths substitutes a passing default for a missing DP, so by the time it has
+    run a sample the caller never covered is indistinguishable from a well-covered one.
+    This reads the same fields and reports only presence.
+
+    With neither DP nor AD in the record, depth cannot be evidence either way, so every
+    sample is reported as having it and the parental gate rests on GQ alone.
+    """
+    if 'DP' in variant.FORMAT:
+        return [bool(value[0] >= 0) for value in variant.format('DP')]
+    if 'AD' in variant.FORMAT:
+        return [bool((row >= 0).any()) for row in variant.format('AD')]
+    return [True] * n_samples
+
+
+def parent_has_evidence(gq: float, has_depth: bool, conf: DeNovoConfig) -> bool:
+    """Did the caller really call this parent here, to the standard the config asks for?
+
+    `bcftools merge -0` asserts 0/0 for every sample absent from its source VCF, with no
+    GQ and no DP. cyvcf2 reports a missing GQ as -1.
+    """
+    if not conf.require_parent_evidence:
+        return True
+    return gq >= 0 and gq >= conf.min_parent_gq and has_depth
+
+
 def resolve_trio_entry(
     gt_type: int,
     gq: float,
@@ -479,9 +514,17 @@ def candidate_configuration(
     kid: int | None,
     dad: int | None,
     mom: int | None,
+    dad_called: bool = True,
+    mom_called: bool = True,
 ) -> bool:
-    """The Mendelian-inconsistency configurations accepted as candidate de novo calls."""
-    parents_wt = dad == HOM_REF and mom == HOM_REF
+    """The Mendelian-inconsistency configurations accepted as candidate de novo calls.
+
+    dad_called / mom_called are required alongside each parental hom-ref this test
+    already reads: both parents on an autosome and on X, the father alone on Y, the
+    mother alone on mito. They default to True, so with the gate off every branch
+    collapses to its original form.
+    """
+    parents_wt = dad == HOM_REF and mom == HOM_REF and dad_called and mom_called
     if region == AUTOSOME_OR_PAR:
         return kid == HET and parents_wt
     if region == X_NONPAR:
@@ -490,8 +533,8 @@ def candidate_configuration(
             return False
         return (kid == HET if is_female else kid in (HET, HOM_ALT)) and parents_wt
     if region == Y_NONPAR:
-        return kid in (HET, HOM_ALT) and dad == HOM_REF
-    return region == MITO and kid == HOM_ALT and mom == HOM_REF
+        return kid in (HET, HOM_ALT) and dad == HOM_REF and dad_called
+    return region == MITO and kid == HOM_ALT and mom == HOM_REF and mom_called
 
 
 def de_novo_sample_ids(variant: Variant, trios: list[Trio], conf: DeNovoConfig) -> list[str]:
@@ -503,6 +546,9 @@ def de_novo_sample_ids(variant: Variant, trios: list[Trio], conf: DeNovoConfig) 
     gt_types = variant.gt_types
     gqs = variant.gt_quals
     depths = entry_depths(variant, len(gt_types), default_depth=conf.min_depth + 1)
+    # read before entry_depths' substitution is applied below, which is the only point
+    # at which an uncalled sample is still distinguishable from a covered one
+    has_depth = entry_has_depth(variant, len(gt_types))
 
     hits = []
     for trio in trios:
@@ -527,7 +573,15 @@ def de_novo_sample_ids(variant: Variant, trios: list[Trio], conf: DeNovoConfig) 
             trio.mother_affected,
             conf,
         )
-        if not candidate_configuration(region, trio.child_is_female, kid_gt, dad_gt, mom_gt):
+        if not candidate_configuration(
+            region,
+            trio.child_is_female,
+            kid_gt,
+            dad_gt,
+            mom_gt,
+            parent_has_evidence(gqs[trio.father_idx], has_depth[trio.father_idx], conf),
+            parent_has_evidence(gqs[trio.mother_idx], has_depth[trio.mother_idx], conf),
+        ):
             continue
         if kid_gq is None or kid_gq < conf.min_proband_gq:
             continue
@@ -774,6 +828,9 @@ def main(
 
     critical_csqs = set(config_retrieve(['RunSmallFiltering', 'critical_csq'], CRITICAL_CSQ_DEFAULT))
     additional_csqs = set(config_retrieve(['RunSmallFiltering', 'additional_csq'], ADDITIONAL_CSQ_DEFAULT))
+    dn_conf = DeNovoConfig.from_config()
+    if dn_conf.require_parent_evidence:
+        logger.info(f'de novo calls require real parental data, GQ >= {dn_conf.min_parent_gq}')
     ctx = StreamingContext(
         writer=writer,
         csq_fields=csq_fields,
@@ -783,7 +840,7 @@ def main(
         new_genes=new_genes,
         pm5=load_pm5_json(pm5),
         trios=trios,
-        dn_conf=DeNovoConfig.from_config(),
+        dn_conf=dn_conf,
         af_semi_rare=config_retrieve(['RunSmallFiltering', 'af_semi_rare'], 0.01),
         am_threshold=config_retrieve(['RunSmallFiltering', 'am_pathogenicity'], 0.564),
         spliceai_threshold=config_retrieve(['RunSmallFiltering', 'spliceai'], 0.5),
