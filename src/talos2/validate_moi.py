@@ -49,6 +49,7 @@ from talos2.utils import (
 from talos2.version import __version__
 
 AMBIGUOUS_FLAG = 'Ambiguous Cat.1 MOI'
+UNEVIDENCED_FLAG = 'Unevidenced family genotype'
 MALE_FEMALE = {
     0: MemberSex.UNKNOWN.value,
     1: MemberSex.MALE.value,
@@ -165,6 +166,14 @@ def apply_moi_to_variants(
 
                     if each_result.reasons == 'Autosomal Dominant':
                         each_result.flags.add(AMBIGUOUS_FLAG)
+
+            # Flag! At least one family member had no call at this locus, so their
+            # genotype reads Unknown rather than WT. Inheritance cannot be settled from
+            # this report alone -- check that member's own VCF, or the alignment, before
+            # treating the variant as de novo or as absent from a parent.
+            for each_result in variant_results:
+                if any(genotype == 'Unknown' for genotype in each_result.genotypes.values()):
+                    each_result.flags.add(UNEVIDENCED_FLAG)
 
             results.extend(variant_results)
 

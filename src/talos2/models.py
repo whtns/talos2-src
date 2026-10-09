@@ -149,6 +149,12 @@ class VariantCommon(BaseModel):
     ignored_categories: set[str] = Field(default_factory=set)
     support_categories: set[str] = Field(default_factory=set)
     phased: dict = Field(default_factory=dict, exclude=True)
+    # sample IDs the caller really made a call for here. `bcftools merge -0` asserts 0/0
+    # for every sample absent from its source VCF, with no GQ and no DP, and without this
+    # set those are indistinguishable from a genuine hom-ref. An empty set means "not
+    # populated", and every consumer must fall back to its previous behaviour, so the SV,
+    # STR and mito paths are unaffected.
+    evidenced_samples: set[str] = Field(default_factory=set, exclude=True)
 
     def __str__(self):
         return repr(self)

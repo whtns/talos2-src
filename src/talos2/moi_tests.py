@@ -555,6 +555,15 @@ class BaseMoi:
             elif member_id in variant.hom_samples:
                 return 'Hom'
 
+            # not a carrier -- but that is only a hom-ref CALL where the caller made one
+            # for this member here. In a callset merged from single-sample VCFs,
+            # `bcftools merge -0` asserts 0/0 for every sample absent from a record, and
+            # printing that as WT invents family evidence a reviewer will read as real.
+            # An empty evidenced_samples means the information was not collected, so the
+            # previous answer stands.
+            if variant.evidenced_samples and member_id not in variant.evidenced_samples:
+                return 'Unknown'
+
             return 'WT'
 
         sample_family_id = self.pedigree.participants[sample_id].family_id

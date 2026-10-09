@@ -631,6 +631,15 @@ def create_small_variant(
 
     transcript_consequences = extract_csq(csq_contents=info.pop('csq', ''))
 
+    # which samples the caller actually called here. Unlike depths/alt_depths above this
+    # covers every sample, not just the carriers, because the family members a report
+    # displays are mostly non-carriers. cyvcf2 reports -1 for a missing depth, which is
+    # what `bcftools merge -0` leaves behind. Built after the category check above, so
+    # rows that are discarded never pay for it.
+    evidenced_samples: set[str] = {
+        sample for sample, depth in zip(samples, var.gt_depths.tolist(), strict=True) if depth >= 0
+    }
+
     return SmallVariant(
         coordinates=coordinates,
         info=info,
@@ -641,6 +650,7 @@ def create_small_variant(
         ignored_categories=ignored_categories,
         support_categories=get_categories_translated(),
         phased=phased,
+        evidenced_samples=evidenced_samples,
         alt_depths=alt_depths,
         depths=depths,
         ab_ratios=ab_ratios,
