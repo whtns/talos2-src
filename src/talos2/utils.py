@@ -607,6 +607,33 @@ def create_small_variant(
         elif isinstance(info[sam_cat], set):
             info[sam_cat] = list(info[sam_cat])
 
+    # Optional floor on the genotype quality of a CARRIER. talos2's only GQ gate lives
+    # inside the de novo test (RunSmallFiltering.de_novo.min_all_sample_gq), where it
+    # filters trio entries, so outside that a variant called at GQ 3 carries a report
+    # with the same weight as one called at GQ 99. Defaults to 0 (off), so upstream
+    # behaviour is unchanged for anyone who does not set it.
+    #
+    # The filter is on the carrier set, not the row, because GQ is per-genotype: the
+    # same row can be a real report for one sample and an artefact for another. Applied
+    # to the sample-category lists at the same time, so a sample dropped for poor
+    # quality cannot re-enter a report through a sample category.
+    #
+    # A carrier whose GQ is MISSING is kept, deliberately. cyvcf2 reports -1 both for a
+    # genotype the caller never emitted and for one carrying no GQ field, and dropping
+    # those would silently discard real calls from any caller that omits GQ. Missing
+    # quality is not evidence of poor quality.
+    min_carrier_gq: int = config_retrieve(['ValidateMOI', 'min_carrier_gq'], 0)
+    if min_carrier_gq > 0:
+        low_gq: set[str] = {
+            sample for sample, gq in zip(samples, var.gt_quals, strict=True) if 0 <= gq < min_carrier_gq
+        }
+        if low_gq:
+            het_samples -= low_gq
+            hom_samples -= low_gq
+            for sam_cat in sample_categories:
+                if isinstance(info[sam_cat], list):
+                    info[sam_cat] = [sample for sample in info[sam_cat] if sample not in low_gq]
+
     phased = get_phase_data(samples, var, carriers.indices)
 
     # only keep these where the sample has a variant - the majority of samples have empty data, and we don't use it

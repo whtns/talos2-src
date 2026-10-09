@@ -1,3 +1,5 @@
+import pathlib
+
 """
 Tests for the two behavioural gates this deployment adds to run_small_filtering.
 
@@ -91,3 +93,72 @@ def test_high_impact_needs_the_mane_transcript_to_carry_the_consequence():
     ]
     assert category_high_impact(consequences, CRITICAL) == 1
     assert category_high_impact(consequences, CRITICAL, require_mane=True) == 0
+
+
+# --- patch 0007: a carrier needs a genotype quality worth reporting ----------------
+#
+# These drive the real create_small_variant against upstream's own labelled fixture,
+# whose single carrier is called at GQ 99, rather than re-implementing the predicate
+# in the test. config_retrieve is patched because the floor is read from TALOS_CONFIG,
+# which conftest points at upstream's test config.
+
+
+def small_variant_with_floor(monkeypatch, floor):
+    """create_small_variant over the labelled fixture, with min_carrier_gq = floor."""
+    from cyvcf2 import VCF
+
+    from talos2 import utils
+
+    real = utils.config_retrieve
+
+    def fake(key, default=None, **kwargs):
+        if key == ['ValidateMOI', 'min_carrier_gq']:
+            return floor
+        return real(key, default, **kwargs) if default is not None else real(key)
+
+    monkeypatch.setattr(utils, 'config_retrieve', fake)
+
+    reader = VCF(str(pathlib.Path(__file__).parent / 'input' / '1_labelled_variant.vcf.bgz'))
+    variant = utils.create_small_variant(next(reader), reader.samples)
+    reader.close()
+    return variant
+
+
+def test_carrier_gq_floor_off_keeps_the_carrier():
+    """floor 0 is the default, and the fixture's GQ 99 carrier is reported."""
+    import pytest
+
+    mp = pytest.MonkeyPatch()
+    try:
+        variant = small_variant_with_floor(mp, 0)
+    finally:
+        mp.undo()
+    assert variant.het_samples == {'male'}
+
+
+def test_carrier_gq_floor_drops_a_carrier_below_it():
+    """The same GQ 99 carrier disappears once the floor is above its GQ."""
+    import pytest
+
+    mp = pytest.MonkeyPatch()
+    try:
+        variant = small_variant_with_floor(mp, 100)
+    finally:
+        mp.undo()
+    assert variant.het_samples == set()
+    assert variant.hom_samples == set()
+    # and it cannot come back through a sample category
+    for category in variant.sample_categories:
+        assert 'male' not in variant.info[category]
+
+
+def test_carrier_gq_floor_keeps_the_carrier_just_at_the_floor():
+    """The comparison is `gq < floor`, so a carrier exactly at the floor survives."""
+    import pytest
+
+    mp = pytest.MonkeyPatch()
+    try:
+        variant = small_variant_with_floor(mp, 99)
+    finally:
+        mp.undo()
+    assert variant.het_samples == {'male'}
